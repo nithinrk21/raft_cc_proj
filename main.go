@@ -179,3 +179,102 @@ func printJobsHandler(raftNode *raft.Raft, state *State) http.HandlerFunc {
 		}
 	}
 }
+func filamentsHandler(raftNode *raft.Raft, state *State) http.HandlerFunc {
+	validTypes := map[string]bool{"PLA": true, "PETG": true, "ABS": true, "TPU": true}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var filament Filament
+			if err := json.NewDecoder(r.Body).Decode(&filament); err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
+
+			if !validTypes[filament.Type] {
+				http.Error(w, "Invalid filament type", http.StatusBadRequest)
+				return
+			}
+
+			cmd := map[string]interface{}{
+				"op":       "add_filament",
+				"filament": filament,
+			}
+			applyCommand(raftNode, state, w, cmd)
+
+		case http.MethodGet:
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			json.NewEncoder(w).Encode(state.Filaments)
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
+
+func printJobsHandler(raftNode *raft.Raft, state *State) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			var job PrintJob
+			if err := json.NewDecoder(r.Body).Decode(&job); err != nil {
+				http.Error(w, "Invalid request", http.StatusBadRequest)
+				return
+			}
+
+			// Enforce Queued status before validation
+			job.Status = "Queued"
+
+			// Validate in a separate lock scope
+			state.mu.Lock()
+			_, printerExists := state.Printers[job.PrinterID]
+			filament, filamentExists := state.Filaments[job.FilamentID]
+			state.mu.Unlock()
+
+			if !printerExists {
+				http.Error(w, "Printer not found", http.StatusBadRequest)
+				return
+			}
+			if !filamentExists {
+				http.Error(w, "Filament not found", http.StatusBadRequest)
+				return
+			}
+
+			// Calculate remaining weight without holding the lock
+			state.mu.Lock()
+			totalReserved := 0
+			for _, j := range state.Jobs {
+				if j.FilamentID == job.FilamentID && (j.Status == "Queued" || j.Status == "Running") {
+					totalReserved += j.Weight
+				}
+			}
+			state.mu.Unlock()
+
+			if filament.Remaining-totalReserved < job.Weight {
+				http.Error(w, "Not enough filament", http.StatusBadRequest)
+				return
+			}
+
+			// Apply command
+			cmd := map[string]interface{}{
+				"op":  "add_job",
+				"job": job,
+			}
+			applyCommand(raftNode, state, w, cmd)
+
+		case http.MethodGet:
+			state.mu.Lock()
+			defer state.mu.Unlock()
+
+			jobs := make([]PrintJob, 0, len(state.Jobs))
+			for _, j := range state.Jobs {
+				jobs = append(jobs, j)
+			}
+			json.NewEncoder(w).Encode(jobs)
+
+		default:
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	}
+}
