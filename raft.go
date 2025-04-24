@@ -81,3 +81,34 @@ func (s *State) Apply(log *raft.Log) interface{} {
 	}
 	return nil
 }
+func (s *State) Snapshot() (raft.FSMSnapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	snapshot := &StateSnapshot{
+		Printers:  make(map[string]Printer),
+		Filaments: make(map[string]Filament),
+		Jobs:      make(map[string]PrintJob),
+	}
+	for k, v := range s.Printers {
+		snapshot.Printers[k] = v
+	}
+	for k, v := range s.Filaments {
+		snapshot.Filaments[k] = v
+	}
+	for k, v := range s.Jobs {
+		snapshot.Jobs[k] = v
+	}
+	return snapshot, nil
+}
+
+func (s *State) Restore(rc io.ReadCloser) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer rc.Close()
+
+	s.Printers = make(map[string]Printer)
+	s.Filaments = make(map[string]Filament)
+	s.Jobs = make(map[string]PrintJob)
+	return json.NewDecoder(rc).Decode(s)
+}
